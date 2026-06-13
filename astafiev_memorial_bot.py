@@ -4,12 +4,13 @@
 """
 Telegram-бот для Мемориального комплекса В.П. Астафьева в Овсянке
 С поддержкой health check для Render.com
+Полная админ-панель: удаление мероприятий, добавление фото, управление админами
 """
 
 import asyncio
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -27,7 +28,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ========== НАСТРОЙКИ ==========
-# Берем данные из переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -45,7 +45,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
     
     def log_message(self, format, *args):
-        pass  # Отключаем логи health check сервера
+        pass
 
 def run_health_server():
     port = int(os.environ.get('PORT', 8080))
@@ -62,16 +62,33 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ========== ПРОВЕРКА АДМИНА ==========
 def is_admin(user_id: int) -> bool:
-    """Проверяет, есть ли пользователь в таблице admins"""
     try:
         result = supabase.table("admins").select("user_id").eq("user_id", user_id).execute()
         return len(result.data) > 0
     except Exception:
         return False
 
+# ========== ФУНКЦИЯ АВТОУДАЛЕНИЯ СТАРЫХ МЕРОПРИЯТИЙ ==========
+async def auto_delete_old_events():
+    """Запускается раз в сутки и удаляет мероприятия, которые прошли более 2 дней назад"""
+    while True:
+        try:
+            # Дата, которая была 2 дня назад
+            two_days_ago = (datetime.now() - timedelta(days=2)).date()
+            
+            # Обновляем статус старых мероприятий на is_active = False
+            result = supabase.table("events").update({"is_active": False}).lt("event_date", two_days_ago).execute()
+            
+            if result.data:
+                print(f"🗑️ Автоудаление: отключено {len(result.data)} старых мероприятий")
+        except Exception as e:
+            print(f"❌ Ошибка автоудаления: {e}")
+        
+        # Ждём 24 часа до следующей проверки
+        await asyncio.sleep(86400)
+
 # ========== ГЛАВНОЕ МЕНЮ ==========
 def get_main_keyboard(user_id: int):
-    """Создаёт клавиатуру с учётом прав администратора"""
     keyboard = [
         [KeyboardButton(text="🏛️ О комплексе")],
         [KeyboardButton(text="🎟️ Объекты"), KeyboardButton(text="📅 Афиша")],
@@ -116,7 +133,6 @@ async def about_complex(message: types.Message):
 
 @dp.message(F.text == "🎟️ Объекты")
 async def show_objects(message: types.Message):
-    """Показывает список объектов из Supabase"""
     try:
         result = supabase.table("objects").select("*").eq("is_active", True).order("order_index").execute()
         objects = result.data
@@ -136,7 +152,6 @@ async def show_objects(message: types.Message):
 
 @dp.callback_query(F.data.startswith("obj_"))
 async def show_object_detail(callback: types.CallbackQuery):
-    """Детальная информация об объекте"""
     try:
         obj_id = int(callback.data.split("_")[1])
         result = supabase.table("objects").select("*").eq("id", obj_id).execute()
@@ -171,7 +186,6 @@ async def show_object_detail(callback: types.CallbackQuery):
 
 @dp.message(F.text == "📅 Афиша")
 async def show_events(message: types.Message):
-    """Показывает список мероприятий"""
     try:
         result = supabase.table("events").select("*").eq("is_active", True).order("event_date").execute()
         events = result.data
@@ -222,13 +236,21 @@ async def contacts(message: types.Message):
     )
     await message.answer(text, parse_mode="Markdown")
 
-# ========== АДМИН-ПАНЕЛЬ ==========
+# ========== АДМИН-ПАНЕЛЬ (РАСШИРЕННАЯ) ==========
 class AddEventState(StatesGroup):
     title = State()
     description = State()
     date = State()
     time = State()
     price = State()
+
+class AddPhotoState(StatesGroup):
+    select_object = State()
+    upload_photo = State()
+
+class AddAdminState(StatesGroup):
+    user_id = State()
+    username = State()
 
 @dp.message(F.text == "🔧 Админ-панель")
 async def admin_panel(message: types.Message):
@@ -238,6 +260,9 @@ async def admin_panel(message: types.Message):
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📝 Добавить мероприятие", callback_data="admin_add_event")],
+        [InlineKeyboardButton(text="🗑️ Удалить мероприятие", callback_data="admin_delete_event")],
+        [InlineKeyboardButton(text="🖼️ Добавить фото для объекта", callback_data="admin_add_photo")],
+        [InlineKeyboardButton(text="👥 Добавить администратора", callback_data="admin_add_admin")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")]
     ])
     
@@ -248,6 +273,7 @@ async def admin_panel(message: types.Message):
         parse_mode="Markdown"
     )
 
+# ========== 1. ДОБАВЛЕНИЕ МЕРОПРИЯТИЯ ==========
 @dp.callback_query(F.data == "admin_add_event")
 async def add_event_start(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -304,6 +330,238 @@ async def add_event_price(message: types.Message, state: FSMContext):
     
     await state.clear()
 
+# ========== 2. УДАЛЕНИЕ МЕРОПРИЯТИЯ ==========
+@dp.callback_query(F.data == "admin_delete_event")
+async def delete_event_list(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещён")
+        return
+    
+    try:
+        result = supabase.table("events").select("*").eq("is_active", True).order("event_date").execute()
+        events = result.data
+        
+        if not events:
+            await callback.message.answer("📭 Нет активных мероприятий для удаления.")
+            await callback.answer()
+            return
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"{e['event_date']} — {e['title']}", callback_data=f"del_{e['id']}")]
+            for e in events
+        ])
+        
+        await callback.message.answer(
+            "🗑️ *Выберите мероприятие для удаления:*",
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
+        await callback.answer()
+    except Exception as e:
+        await callback.message.answer(f"❌ Ошибка: {str(e)}")
+        await callback.answer()
+
+@dp.callback_query(F.data.startswith("del_"))
+async def confirm_delete_event(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещён")
+        return
+    
+    event_id = int(callback.data.split("_")[1])
+    
+    # Получаем название мероприятия для подтверждения
+    result = supabase.table("events").select("title").eq("id", event_id).execute()
+    if result.data:
+        event_title = result.data[0]['title']
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_del_{event_id}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_delete")]
+        ])
+        
+        await callback.message.answer(
+            f"⚠️ Вы уверены, что хотите удалить мероприятие *«{event_title}»*?\n\nЭто действие необратимо.",
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("confirm_del_"))
+async def execute_delete_event(callback: types.CallbackQuery):
+    event_id = int(callback.data.split("_")[2])
+    
+    try:
+        # Получаем название перед удалением
+        result = supabase.table("events").select("title").eq("id", event_id).execute()
+        event_title = result.data[0]['title'] if result.data else "мероприятие"
+        
+        # Удаляем (или помечаем is_active = False)
+        supabase.table("events").update({"is_active": False}).eq("id", event_id).execute()
+        
+        await callback.message.answer(f"✅ Мероприятие *«{event_title}»* удалено из афиши.", parse_mode="Markdown")
+    except Exception as e:
+        await callback.message.answer(f"❌ Ошибка при удалении: {str(e)}")
+    
+    await callback.answer()
+
+@dp.callback_query(F.data == "cancel_delete")
+async def cancel_delete(callback: types.CallbackQuery):
+    await callback.message.answer("❌ Удаление отменено.")
+    await callback.answer()
+
+# ========== 3. ДОБАВЛЕНИЕ ФОТО ДЛЯ ОБЪЕКТА ==========
+@dp.callback_query(F.data == "admin_add_photo")
+async def add_photo_select_object(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещён")
+        return
+    
+    try:
+        result = supabase.table("objects").select("id, name_ru").eq("is_active", True).execute()
+        objects = result.data
+        
+        if not objects:
+            await callback.message.answer("❌ Нет доступных объектов.")
+            await callback.answer()
+            return
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=obj['name_ru'], callback_data=f"photoobj_{obj['id']}")]
+            for obj in objects
+        ])
+        
+        await state.set_state(AddPhotoState.select_object)
+        await callback.message.answer(
+            "🖼️ *Выберите объект, для которого хотите добавить фото:*",
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
+        await callback.answer()
+    except Exception as e:
+        await callback.message.answer(f"❌ Ошибка: {str(e)}")
+        await callback.answer()
+
+@dp.callback_query(F.data.startswith("photoobj_"), AddPhotoState.select_object)
+async def add_photo_upload(callback: types.CallbackQuery, state: FSMContext):
+    object_id = int(callback.data.split("_")[1])
+    await state.update_data(object_id=object_id)
+    await state.set_state(AddPhotoState.upload_photo)
+    
+    await callback.message.answer(
+        "📸 Отправьте *фотографию* для этого объекта.\n\n"
+        "Просто отправьте изображение — оно автоматически загрузится.",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.message(AddPhotoState.upload_photo, F.photo)
+async def add_photo_save(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    object_id = data['object_id']
+    
+    try:
+        # Получаем файл
+        photo = message.photo[-1]  # Самое большое разрешение
+        file = await bot.get_file(photo.file_id)
+        file_bytes = await bot.download_file(file.file_path)
+        
+        # Сохраняем в Supabase Storage
+        file_name = f"object_{object_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        
+        # Загружаем в бакет museum_photos
+        supabase.storage.from_("museum_photos").upload(
+            file_name,
+            file_bytes.getvalue(),
+            {"content-type": "image/jpeg"}
+        )
+        
+        # Получаем публичную ссылку
+        public_url = supabase.storage.from_("museum_photos").get_public_url(file_name)
+        
+        # Обновляем запись в таблице objects
+        supabase.table("objects").update({"photo_url": public_url}).eq("id", object_id).execute()
+        
+        await message.answer(
+            f"✅ Фото успешно загружено!\n\n"
+            f"Теперь при просмотре объекта будет отображаться это изображение."
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при загрузке фото: {str(e)}")
+    
+    await state.clear()
+
+@dp.message(AddPhotoState.upload_photo)
+async def add_photo_invalid(message: types.Message):
+    await message.answer("❌ Пожалуйста, отправьте *фотографию* (не текст или другой файл).", parse_mode="Markdown")
+
+# ========== 4. ДОБАВЛЕНИЕ АДМИНИСТРАТОРА ==========
+@dp.callback_query(F.data == "admin_add_admin")
+async def add_admin_start(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещён")
+        return
+    
+    await state.set_state(AddAdminState.user_id)
+    await callback.message.answer(
+        "👥 *Добавление нового администратора*\n\n"
+        "Введите *Telegram ID* пользователя.\n\n"
+        "Как узнать ID:\n"
+        "1. Попросите пользователя написать @userinfobot\n"
+        "2. Он пришлёт сообщение с его ID (число)\n\n"
+        "Введите ID:",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.message(AddAdminState.user_id)
+async def add_admin_id(message: types.Message, state: FSMContext):
+    try:
+        user_id = int(message.text.strip())
+        await state.update_data(user_id=user_id)
+        await state.set_state(AddAdminState.username)
+        await message.answer(
+            "Введите *username* нового администратора (без @)\n"
+            "Например: tatyana_z\n\n"
+            "Или отправьте '-' чтобы пропустить:",
+            parse_mode="Markdown"
+        )
+    except ValueError:
+        await message.answer("❌ Неверный формат. Введите число (Telegram ID).")
+
+@dp.message(AddAdminState.username)
+async def add_admin_username(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    username = message.text if message.text != "-" else None
+    
+    try:
+        # Проверяем, не существует ли уже такой администратор
+        existing = supabase.table("admins").select("user_id").eq("user_id", data['user_id']).execute()
+        if existing.data:
+            await message.answer(f"❌ Пользователь с ID {data['user_id']} уже является администратором.")
+            await state.clear()
+            return
+        
+        # Добавляем нового администратора
+        supabase.table("admins").insert({
+            "user_id": data['user_id'],
+            "username": username,
+            "role": "editor",
+            "added_at": datetime.now().isoformat()
+        }).execute()
+        
+        await message.answer(
+            f"✅ Новый администратор добавлен!\n\n"
+            f"• ID: `{data['user_id']}`\n"
+            f"• Username: {username or 'не указан'}\n\n"
+            f"Теперь этот пользователь будет видеть кнопку «Админ-панель».",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при добавлении: {str(e)}")
+    
+    await state.clear()
+
+# ========== 5. СТАТИСТИКА ==========
 @dp.callback_query(F.data == "admin_stats")
 async def admin_stats(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -320,7 +578,8 @@ async def admin_stats(callback: types.CallbackQuery):
             f"🏛️ Объектов в базе: {objects_count.count}\n"
             f"📅 Мероприятий: {events_count.count}\n"
             f"👥 Администраторов: {admins_count.count}\n\n"
-            f"⚡ Работает на Supabase + aiogram",
+            f"⚡ Работает на Supabase + aiogram\n"
+            f"🗑️ Старые мероприятия удаляются автоматически через 2 дня",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -352,10 +611,20 @@ async def main():
     health_thread.start()
     print("✅ Health check сервер запущен на порту 8080")
     
+    # Запускаем фоновую задачу автоудаления старых мероприятий
+    asyncio.create_task(auto_delete_old_events())
+    print("✅ Запущена задача автоудаления старых мероприятий (каждые 24 часа)")
+    
     print("🤖 Бот для Мемориального комплекса Астафьева успешно запущен!")
     print("📱 Откройте Telegram и найдите бота")
+    print("\n🔧 Доступные функции админ-панели:")
+    print("   • 📝 Добавить мероприятие")
+    print("   • 🗑️ Удалить мероприятие")
+    print("   • 🖼️ Добавить фото для объекта")
+    print("   • 👥 Добавить администратора")
+    print("   • 📊 Статистика")
+    print("   • ⏰ Автоудаление старых событий (каждую ночь)")
     
-    # Запускаем поллинг
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
