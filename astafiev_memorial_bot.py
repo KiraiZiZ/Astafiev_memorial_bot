@@ -1,10 +1,6 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
-"""
-Telegram-бот для Мемориального комплекса В.П. Астафьева в Овсянке
-"""
-
+from flask import Flask
+import threading
 import asyncio
 import os
 from datetime import datetime
@@ -309,6 +305,22 @@ async def main():
     print("✅ Бот для Мемориального комплекса Астафьева запущен!")
     print(f"📱 Откройте Telegram и найдите бота по username")
     await dp.start_polling(bot)
+app = Flask(__name__)
 
+@app.route('/')
+def health_check():
+    return "Bot is running", 200
+
+def run_flask():
+    port = int(os.getenv("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+    
 if __name__ == "__main__":
+    # Запускаем Flask в отдельном потоке
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.start()
+    
+    # Запускаем бота
     asyncio.run(main())
+
+
