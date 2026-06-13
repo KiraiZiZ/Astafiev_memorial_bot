@@ -494,7 +494,10 @@ async def add_photo_save(message: types.Message, state: FSMContext):
 async def add_photo_invalid(message: types.Message):
     await message.answer("❌ Пожалуйста, отправьте *фотографию* (не текст или другой файл).", parse_mode="Markdown")
 
-# ========== 4. ДОБАВЛЕНИЕ АДМИНИСТРАТОРА ==========
+# ========== ДОБАВЛЕНИЕ АДМИНИСТРАТОРА (с проверкой существования пользователя) ==========
+class AddAdminState(StatesGroup):
+    user_id = State()
+
 @dp.callback_query(F.data == "admin_add_admin")
 async def add_admin_start(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -514,50 +517,70 @@ async def add_admin_start(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 @dp.message(AddAdminState.user_id)
-async def add_admin_id(message: types.Message, state: FSMContext):
+async def add_admin_check_user(message: types.Message, state: FSMContext):
     try:
         user_id = int(message.text.strip())
-        await state.update_data(user_id=user_id)
-        await state.set_state(AddAdminState.username)
-        await message.answer(
-            "Введите *username* нового администратора (без @)\n"
-            "Например: tatyana_z\n\n"
-            "Или отправьте '-' чтобы пропустить:",
-            parse_mode="Markdown"
-        )
     except ValueError:
-        await message.answer("❌ Неверный формат. Введите число (Telegram ID).")
-
-@dp.message(AddAdminState.username)
-async def add_admin_username(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    username = message.text if message.text != "-" else None
+        await message.answer("❌ Неверный формат. Введите число (Telegram ID).\n\nПопробуйте ещё раз:")
+        return
     
     try:
-        # Проверяем, не существует ли уже такой администратор
-        existing = supabase.table("admins").select("user_id").eq("user_id", data['user_id']).execute()
+        # ПЫТАЕМСЯ ПОЛУЧИТЬ ИНФОРМАЦИЮ О ПОЛЬЗОВАТЕЛЕ ЧЕРЕЗ TELEGRAM API
+        # Это проверит, существует ли пользователь с таким ID
+        user_info = await bot.get_chat(user_id)
+        
+        # Если дошли сюда — пользователь существует
+        username = user_info.username if user_info.username else None
+        first_name = user_info.first_name
+        
+        # Проверяем, не админ ли уже
+        existing = supabase.table("admins").select("user_id").eq("user_id", user_id).execute()
         if existing.data:
-            await message.answer(f"❌ Пользователь с ID {data['user_id']} уже является администратором.")
+            await message.answer(
+                f"❌ Пользователь *{first_name}* (ID: `{user_id}`) уже является администратором.",
+                parse_mode="Markdown"
+            )
             await state.clear()
             return
         
-        # Добавляем нового администратора
+        # Добавляем администратора
         supabase.table("admins").insert({
-            "user_id": data['user_id'],
+            "user_id": user_id,
             "username": username,
-            "role": "editor",
-            "added_at": datetime.now().isoformat()
+            "role": "editor"
         }).execute()
         
         await message.answer(
-            f"✅ Новый администратор добавлен!\n\n"
-            f"• ID: `{data['user_id']}`\n"
-            f"• Username: {username or 'не указан'}\n\n"
+            f"✅ *Новый администратор добавлен!*\n\n"
+            f"• Имя: {first_name}\n"
+            f"• Username: {'@' + username if username else 'не указан'}\n"
+            f"• ID: `{user_id}`\n\n"
             f"Теперь этот пользователь будет видеть кнопку «Админ-панель».",
             parse_mode="Markdown"
         )
+        
+        # Опционально: отправить уведомление новому администратору
+        try:
+            await bot.send_message(
+                user_id,
+                f"🎉 *Вы стали администратором бота Мемориального комплекса Астафьева!*\n\n"
+                f"Теперь вам доступна админ-панель. Напишите /start, чтобы увидеть кнопку «🔧 Админ-панель».",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass  # Не отправилось — ничего страшного
+        
     except Exception as e:
-        await message.answer(f"❌ Ошибка при добавлении: {str(e)}")
+        error_text = str(e)
+        if "USER_ID_INVALID" in error_text or "user not found" in error_text.lower():
+            await message.answer(
+                f"❌ Пользователь с ID `{user_id}` не найден в Telegram.\n\n"
+                f"Проверьте правильность ID и попробуйте снова.\n\n"
+                f"Как узнать ID: @userinfobot",
+                parse_mode="Markdown"
+            )
+        else:
+            await message.answer(f"❌ Ошибка: {error_text}")
     
     await state.clear()
 
