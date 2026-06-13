@@ -6,6 +6,7 @@ Telegram-бот для Мемориального комплекса В.П. Ас
 """
 
 import asyncio
+import os
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
