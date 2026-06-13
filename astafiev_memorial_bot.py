@@ -1,42 +1,58 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
 Telegram-бот для Мемориального комплекса В.П. Астафьева в Овсянке
-С поддержкой вебхуков для работы на Render
+С поддержкой health check для Render.com
 """
 
 import asyncio
 import os
-import logging
+import threading
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton,
-    WebhookInfo
+    ReplyKeyboardMarkup, KeyboardButton
 )
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from supabase import create_client
-from aiohttp import web
-import ssl
+from dotenv import load_dotenv
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Загружаем переменные окружения из .env файла
+load_dotenv()
 
 # ========== НАСТРОЙКИ ==========
+# Берем данные из переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-PORT = int(os.getenv("PORT", 8080))
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # URL вашего Render сервиса (например: https://your-bot.onrender.com)
 
-# Проверка, что переменные заданы
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN не задан в переменных окружения")
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("SUPABASE_URL или SUPABASE_KEY не заданы")
+# ========== HEALTH CHECK HTTP СЕРВЕР ==========
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'Bot is alive! Astafiev Memorial Complex Bot Running')
+    
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+    
+    def log_message(self, format, *args):
+        pass  # Отключаем логи health check сервера
+
+def run_health_server():
+    port = int(os.environ.get('PORT', 8080))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    print(f"✅ Health check server running on port {port}")
+    server.serve_forever()
+# ==========================================
 
 # ========== ИНИЦИАЛИЗАЦИЯ ==========
 bot = Bot(token=BOT_TOKEN)
@@ -50,8 +66,7 @@ def is_admin(user_id: int) -> bool:
     try:
         result = supabase.table("admins").select("user_id").eq("user_id", user_id).execute()
         return len(result.data) > 0
-    except Exception as e:
-        logger.error(f"Ошибка проверки админа: {e}")
+    except Exception:
         return False
 
 # ========== ГЛАВНОЕ МЕНЮ ==========
@@ -117,7 +132,6 @@ async def show_objects(message: types.Message):
         
         await message.answer("🏛️ *Выберите объект:*", reply_markup=keyboard, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Ошибка загрузки объектов: {e}")
         await message.answer("❌ Ошибка загрузки данных. Попробуйте позже.")
 
 @dp.callback_query(F.data.startswith("obj_"))
@@ -152,7 +166,6 @@ async def show_object_detail(callback: types.CallbackQuery):
         
         await callback.answer()
     except Exception as e:
-        logger.error(f"Ошибка загрузки деталей объекта: {e}")
         await callback.message.answer("❌ Ошибка загрузки информации об объекте.")
         await callback.answer()
 
@@ -180,7 +193,6 @@ async def show_events(message: types.Message):
         
         await message.answer(text, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Ошибка загрузки афиши: {e}")
         await message.answer("❌ Ошибка загрузки афиши.")
 
 @dp.message(F.text == "🚆 Как добраться")
@@ -288,7 +300,6 @@ async def add_event_price(message: types.Message, state: FSMContext):
         
         await message.answer(f"✅ Мероприятие *«{data['title']}»* успешно добавлено!\n\nОно появится в разделе «Афиша».", parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Ошибка добавления мероприятия: {e}")
         await message.answer(f"❌ Ошибка при добавлении мероприятия: {str(e)}")
     
     await state.clear()
@@ -313,79 +324,39 @@ async def admin_stats(callback: types.CallbackQuery):
             parse_mode="Markdown"
         )
     except Exception as e:
-        logger.error(f"Ошибка статистики: {e}")
         await callback.message.answer(f"❌ Ошибка: {str(e)}")
     
     await callback.answer()
 
-# ========== ВЕБХУКИ ДЛЯ RENDER ==========
-async def on_startup():
-    """Настройка вебхука при запуске"""
-    if not WEBHOOK_URL:
-        logger.warning("WEBHOOK_URL не задан, работаем через polling")
+# ========== ЗАПУСК ==========
+async def main():
+    print("🚀 Запуск бота...")
+    
+    # Проверяем подключение к Supabase
+    try:
+        supabase.table("admins").select("user_id").limit(1).execute()
+        print("✅ Подключение к Supabase успешно")
+    except Exception as e:
+        print(f"❌ Ошибка подключения к Supabase: {e}")
         return
     
-    webhook_url = f"{WEBHOOK_URL}/webhook"
-    logger.info(f"Настройка вебхука: {webhook_url}")
+    # Проверяем наличие токена бота
+    if not BOT_TOKEN or BOT_TOKEN == "ВАШ_ТОКЕН_ОТ_BOTFATHER":
+        print("❌ Не указан BOT_TOKEN в переменных окружения!")
+        return
     
-    # Удаляем старый вебхук
-    await bot.delete_webhook()
+    print("✅ Токен бота загружен")
     
-    # Устанавливаем новый вебхук
-    await bot.set_webhook(
-        url=webhook_url,
-        allowed_updates=dp.resolve_used_update_types(),
-        drop_pending_updates=True
-    )
+    # Запускаем health check сервер в отдельном потоке
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
+    print("✅ Health check сервер запущен на порту 8080")
     
-    # Проверяем установку
-    webhook_info = await bot.get_webhook_info()
-    logger.info(f"Вебхук установлен: {webhook_info.url}")
-
-async def on_shutdown():
-    """Очистка при выключении"""
-    logger.info("Выключение бота...")
-    await bot.delete_webhook()
-    await bot.session.close()
-
-# Веб-обработчик для вебхуков
-async def webhook_handle(request):
-    """Обработка входящих запросов от Telegram"""
-    try:
-        update = types.Update.model_validate(await request.json(), context={"bot": bot})
-        await dp.feed_update(bot, update)
-        return web.Response(status=200)
-    except Exception as e:
-        logger.error(f"Ошибка обработки вебхука: {e}")
-        return web.Response(status=200)  # Возвращаем 200 даже при ошибке, чтобы Telegram не переотправлял
-
-async def health_check(request):
-    """Endpoint для проверки здоровья сервера"""
-    return web.Response(text="Bot is running", status=200)
-
-def main():
-    """Запуск бота в режиме вебхука или polling"""
-    app = web.Application()
+    print("🤖 Бот для Мемориального комплекса Астафьева успешно запущен!")
+    print("📱 Откройте Telegram и найдите бота")
     
-    # Маршруты
-    app.router.post("/webhook", webhook_handle)
-    app.router.get("/health", health_check)
-    app.router.get("/", health_check)
-    
-    if WEBHOOK_URL:
-        # Режим с вебхуком
-        app.on_startup.append(lambda _: on_startup())
-        app.on_shutdown.append(lambda _: on_shutdown())
-        logger.info(f"Запуск в режиме вебхука на порту {PORT}")
-        web.run_app(app, host="0.0.0.0", port=PORT)
-    else:
-        # Режим polling (для локальной разработки)
-        logger.info("Запуск в режиме polling")
-        async def polling_main():
-            await on_startup()
-            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-        
-        asyncio.run(polling_main())
+    # Запускаем поллинг
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
