@@ -19,10 +19,15 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from supabase import create_client
 
 # ========== НАСТРОЙКИ ==========
-# ВСТАВЬТЕ СВОИ ДАННЫЕ:
-BOT_TOKEN = "ВАШ_ТОКЕН_ОТ_BOTFATHER"
-SUPABASE_URL = "https://ВАШ_ПРОЕКТ.supabase.co"
-SUPABASE_KEY = "ВАШ_ANON_КЛЮЧ"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+# Проверка, что переменные заданы
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не задан в переменных окружения")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("SUPABASE_URL или SUPABASE_KEY не заданы")
 
 # ========== ИНИЦИАЛИЗАЦИЯ ==========
 bot = Bot(token=BOT_TOKEN)
