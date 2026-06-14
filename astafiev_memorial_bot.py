@@ -117,7 +117,7 @@ async def cmd_start(message: types.Message):
 async def about_complex(message: types.Message):
     text = (
         "🏛️ *Мемориальный комплекс В.П. Астафьева в Овсянке*\n\n"
-        "Открыт 1 мая 2024 года к 100-летию писателя.\n\n"
+        "Открыт 1 мая 2004 года.\n\n"
         "📍 *В состав комплекса входят:*\n"
         "• Национальный центр (ул. Щетинкина, 30)\n"
         "• Дом-музей Астафьева (ул. Щетинкина, 26)\n"
@@ -169,7 +169,7 @@ async def show_object_detail(callback: types.CallbackQuery):
             f"💰 *Цены:*\n"
             f"• Взрослые — {obj['price_adult']}₽\n"
             f"• Льготный (дети/студенты/пенсионеры) — {obj['price_discount']}₽\n"
-            f"• Многодетные/ветераны — {obj['price_special']}₽\n\n"
+            f"• Многодетные/ветераны/инвалиды III группы — {obj['price_special']}₽\n\n"
             f"{obj['description']}\n\n"
             f"Действует Пушкинская карта."
         )
